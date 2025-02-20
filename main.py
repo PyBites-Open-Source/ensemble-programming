@@ -1,13 +1,17 @@
 import asyncio
 import uuid
 
+import redis
 from decouple import config
 from fastapi import FastAPI, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 DATABASE_URL = config("DATABASE_URL")
+REDIS_URL = config("REDIS_URL", default="redis://localhost:6379")
+
 engine = create_engine(DATABASE_URL, echo=True)
+redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
 
 class SessionModel(SQLModel, table=True):
@@ -19,18 +23,16 @@ class SessionModel(SQLModel, table=True):
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, list[WebSocket]] = {}
-        self.latest_updates: dict[
-            str, str
-        ] = {}  # Stores the latest code updates per session
-        self.lock = asyncio.Lock()
 
     async def connect(self, session_id: str, websocket: WebSocket):
+        """Accept WebSocket connections and track active clients."""
         await websocket.accept()
         if session_id not in self.active_connections:
             self.active_connections[session_id] = []
         self.active_connections[session_id].append(websocket)
 
     def disconnect(self, session_id: str, websocket: WebSocket):
+        """Remove disconnected clients from active connections."""
         self.active_connections[session_id].remove(websocket)
         if not self.active_connections[session_id]:
             del self.active_connections[session_id]
@@ -39,20 +41,6 @@ class ConnectionManager:
         """Send message to all connected clients in a session."""
         for connection in self.active_connections.get(session_id, []):
             await connection.send_text(message)
-
-    async def save_code(self, session_id: str):
-        """Debounced save to database: waits 1 second before committing the latest update."""
-        await asyncio.sleep(1)  # Debounce time (1 sec)
-        async with self.lock:
-            latest_code = self.latest_updates.get(session_id, None)
-            if latest_code:
-                with Session(engine) as session:
-                    stmt = select(SessionModel).where(SessionModel.id == session_id)
-                    session_obj = session.exec(stmt).first()
-                    if session_obj and session_obj.code != latest_code:
-                        session_obj.code = latest_code
-                        session.add(session_obj)
-                        session.commit()
 
 
 app = FastAPI()
@@ -72,6 +60,7 @@ async def home():
 
 @app.post("/new-session")
 async def new_session(goal: str = Form(...)):
+    """Creates a new coding session with a unique ID."""
     with Session(engine) as session:
         new_session = SessionModel(goal=goal)
         session.add(new_session)
@@ -83,19 +72,46 @@ async def new_session(goal: str = Form(...)):
 
 @app.get("/session/{session_id}")
 async def session_page(session_id: str):
+    """Returns the session page with real-time code editor."""
     with open("session.html") as f:
         return HTMLResponse(f.read().replace("{{ session_id }}", session_id))
 
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(session_id: str, websocket: WebSocket):
-    """Handles real-time collaboration over WebSockets."""
+    """Handles real-time collaborative editing via WebSockets."""
     await manager.connect(session_id, websocket)
     try:
         while True:
             data = await websocket.receive_text()
-            manager.latest_updates[session_id] = data  # Store latest code
+            redis_client.set(f"session:{session_id}:code", data)  # Store in Redis
             await manager.broadcast(session_id, data)
-            asyncio.create_task(manager.save_code(session_id))  # Debounced save
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)
+
+
+async def save_code_to_db():
+    """Periodically saves Redis code updates to the database only if changes exist."""
+    while True:
+        await asyncio.sleep(5)  # Wait 5 seconds before checking
+
+        with Session(engine) as session:
+            stmt = select(SessionModel)
+            sessions = session.exec(stmt).all()
+            any_updates = False  # Track if any updates were made
+
+            for session_obj in sessions:
+                redis_code = redis_client.get(f"session:{session_obj.id}:code")
+                if redis_code and redis_code != session_obj.code:
+                    session_obj.code = redis_code
+                    session.add(session_obj)
+                    any_updates = True  # Mark as updated
+
+            if any_updates:
+                session.commit()  # Only commit if there were changes
+
+
+@app.on_event("startup")
+async def start_background_tasks():
+    """Start the Redis-to-DB sync process on app startup."""
+    asyncio.create_task(save_code_to_db())
