@@ -1,10 +1,11 @@
 import uuid
 
+from decouple import config
 from fastapi import FastAPI, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-DATABASE_URL = "sqlite:///ensemble.db"
+DATABASE_URL = config("DATABASE_URL")
 engine = create_engine(DATABASE_URL, echo=True)
 
 

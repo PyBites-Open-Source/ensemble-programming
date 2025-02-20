@@ -7,7 +7,9 @@ Uses FastAPI, sqlmodel, websockets and htmx.
 ## Setup + run
 
 ```bash
-uv sync
-uv run fastapi dev main.py
-# make session and open it in 2nd browser window - enjoy
+$ uv sync
+$ uv run fastapi dev main.py
+# set db
+$ cp .env-template .env
+# go to localhost:8000, create a session and join in from 2nd browser using session link
 ```
