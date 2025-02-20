@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from decouple import config
@@ -18,6 +19,10 @@ class SessionModel(SQLModel, table=True):
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, list[WebSocket]] = {}
+        self.latest_updates: dict[
+            str, str
+        ] = {}  # Stores the latest code updates per session
+        self.lock = asyncio.Lock()
 
     async def connect(self, session_id: str, websocket: WebSocket):
         await websocket.accept()
@@ -31,8 +36,23 @@ class ConnectionManager:
             del self.active_connections[session_id]
 
     async def broadcast(self, session_id: str, message: str):
+        """Send message to all connected clients in a session."""
         for connection in self.active_connections.get(session_id, []):
             await connection.send_text(message)
+
+    async def save_code(self, session_id: str):
+        """Debounced save to database: waits 1 second before committing the latest update."""
+        await asyncio.sleep(1)  # Debounce time (1 sec)
+        async with self.lock:
+            latest_code = self.latest_updates.get(session_id, None)
+            if latest_code:
+                with Session(engine) as session:
+                    stmt = select(SessionModel).where(SessionModel.id == session_id)
+                    session_obj = session.exec(stmt).first()
+                    if session_obj and session_obj.code != latest_code:
+                        session_obj.code = latest_code
+                        session.add(session_obj)
+                        session.commit()
 
 
 app = FastAPI()
@@ -69,17 +89,13 @@ async def session_page(session_id: str):
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(session_id: str, websocket: WebSocket):
+    """Handles real-time collaboration over WebSockets."""
     await manager.connect(session_id, websocket)
     try:
         while True:
             data = await websocket.receive_text()
-            with Session(engine) as session:
-                stmt = select(SessionModel).where(SessionModel.id == session_id)
-                session_obj = session.exec(stmt).first()
-                if session_obj:
-                    session_obj.code = data
-                    session.add(session_obj)
-                    session.commit()
+            manager.latest_updates[session_id] = data  # Store latest code
             await manager.broadcast(session_id, data)
+            asyncio.create_task(manager.save_code(session_id))  # Debounced save
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)
