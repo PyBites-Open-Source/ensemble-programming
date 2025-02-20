@@ -1,7 +1,8 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Form
-from fastapi.responses import HTMLResponse, JSONResponse
-from sqlmodel import SQLModel, Field, Session, create_engine, select
 import uuid
+
+from fastapi import FastAPI, Form, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
+from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 DATABASE_URL = "sqlite:///ensemble.db"
 engine = create_engine(DATABASE_URL, echo=True)
@@ -48,7 +49,6 @@ async def home():
         return HTMLResponse(f.read())
 
 
-
 @app.post("/new-session")
 async def new_session(goal: str = Form(...)):
     with Session(engine) as session:
@@ -56,10 +56,8 @@ async def new_session(goal: str = Form(...)):
         session.add(new_session)
         session.commit()
         return JSONResponse(
-            content={},
-            headers={"HX-Redirect": f"/session/{new_session.id}"}
+            content={}, headers={"HX-Redirect": f"/session/{new_session.id}"}
         )
-
 
 
 @app.get("/session/{session_id}")
@@ -84,4 +82,3 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
             await manager.broadcast(session_id, data)
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)
-
