@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+    <title>Collaborative Coding</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/codemirror.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/python/python.min.js"></script>
+<style>
+.CodeMirror {
+    border: 1px solid #ccc;
+    font-size: 16px;
+    height: 400px;
+}
+
+</style>
+  </head>
+
+  <body>
+    <a href="/">Go back</a>
+    <h1>Session: {{ session_id }}</h1>
+    <textarea id="code-editor"></textarea>
+    <script>
+        var session_id = "{{ session_id }}";
+        var ws = new WebSocket("ws://" + location.host + "/ws/" + session_id);
+        var editor = CodeMirror.fromTextArea(document.getElementById("code-editor"), {
+            mode: "python",
+            theme: "default",
+            lineNumbers: true,
+            autoCloseBrackets: true
+        });
+
+        var isUpdatingFromServer = false;  // Prevent self-triggering loop
+
+        ws.onmessage = function(event) {
+            if (editor.getValue() !== event.data) {  // Only update if different
+                isUpdatingFromServer = true;
+                editor.setValue(event.data);
+                isUpdatingFromServer = false;
+            }
+        };
+
+        editor.on("change", function(cm) {
+            if (!isUpdatingFromServer) {  // Prevent sending updates that originated from the server
+                ws.send(cm.getValue());
+            }
+        });
+    </script>
+  </body>
+
+</html>
