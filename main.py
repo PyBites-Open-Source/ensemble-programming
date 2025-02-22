@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 
 import httpx
@@ -35,6 +36,7 @@ except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
 
 # In-memory storage (used only if Redis is unavailable)
 in_memory_code_storage = {}
+in_memory_roles = {}
 
 
 class SessionModel(SQLModel, table=True):
@@ -139,6 +141,35 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
             await manager.broadcast(session_id, data)
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)
+
+
+@app.websocket("/ws/timer/{session_id}")
+async def websocket_timer(session_id: str, websocket: WebSocket):
+    await websocket.accept()
+    timer = (
+        int(redis_client.get(f"session:{session_id}:timer") or 300)
+        if use_redis
+        else in_memory_roles.get(f"{session_id}:timer", 300)
+    )
+    while True:
+        await asyncio.sleep(1)
+        if timer > 0:
+            timer -= 1
+            if use_redis:
+                redis_client.set(f"session:{session_id}:timer", timer)
+            else:
+                in_memory_roles[f"{session_id}:timer"] = timer
+        await websocket.send_text(json.dumps({"type": "timer", "time": timer}))
+        if timer == 0:
+            timer = 300  # Reset to 5 minutes
+            if use_redis:
+                redis_client.set(f"session:{session_id}:timer", timer)
+            else:
+                in_memory_roles[f"{session_id}:timer"] = timer
+
+            # 🔹 Broadcast the reset timer to ALL clients
+            for connection in manager.active_connections.get(session_id, []):
+                await connection.send_text(json.dumps({"type": "timer", "time": timer}))
 
 
 async def save_code_to_db():
