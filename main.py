@@ -1,10 +1,17 @@
 import asyncio
 import uuid
 
+import httpx
 import redis
 from decouple import config
-import httpx
-from fastapi import FastAPI, Form, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import (
+    FastAPI,
+    Form,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Field, Session, SQLModel, create_engine, select
@@ -14,8 +21,20 @@ REDIS_URL = config("REDIS_URL", default="redis://localhost:6379")
 PISTON_API = "https://emkc.org/api/v2/piston/execute"
 
 engine = create_engine(DATABASE_URL, echo=True)
-redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 templates = Jinja2Templates(directory="templates")
+
+# Try connecting to Redis
+try:
+    redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    redis_client.ping()  # Test Redis connection
+    use_redis = True
+except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
+    redis_client = None
+    use_redis = False
+    print("⚠️ Redis not available. Using in-memory storage instead.")
+
+# In-memory storage (used only if Redis is unavailable)
+in_memory_code_storage = {}
 
 
 class SessionModel(SQLModel, table=True):
@@ -76,19 +95,21 @@ async def new_session(goal: str = Form(...)):
 @app.get("/session/{session_id}")
 async def session_page(request: Request, session_id: str):
     """Returns the session page with real-time code editor."""
-    return templates.TemplateResponse("session.html", {"request": request, "session_id": session_id})
+    return templates.TemplateResponse(
+        "session.html", {"request": request, "session_id": session_id}
+    )
 
 
 @app.post("/run-code/")
 async def run_code(code: str):
+    """Executes the submitted code using Piston API."""
     payload = {
         "language": "python",
         "version": "3.10.0",
-        "files": [{"content": code}]
+        "files": [{"content": code}],
     }
     async with httpx.AsyncClient() as client:
         response = await client.post(PISTON_API, json=payload)
-        breakpoint()
         if response.status_code != 200:
             raise HTTPException(status_code=500, detail="Code execution failed")
         return response.json()
@@ -101,16 +122,21 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            redis_client.set(f"session:{session_id}:code", data)  # Store in Redis
+
+            if use_redis:
+                redis_client.set(f"session:{session_id}:code", data)
+            else:
+                in_memory_code_storage[session_id] = data  # Store in memory
+
             await manager.broadcast(session_id, data)
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)
 
 
 async def save_code_to_db():
-    """Periodically saves Redis code updates to the database only if changes exist."""
+    """Periodically saves Redis/in-memory code updates to the database only if changes exist."""
     while True:
-        await asyncio.sleep(5)  # Wait 5 seconds before checking
+        await asyncio.sleep(5)  # Batch save every 5 seconds
 
         with Session(engine) as session:
             stmt = select(SessionModel)
@@ -118,9 +144,13 @@ async def save_code_to_db():
             any_updates = False  # Track if any updates were made
 
             for session_obj in sessions:
-                redis_code = redis_client.get(f"session:{session_obj.id}:code")
-                if redis_code and redis_code != session_obj.code:
-                    session_obj.code = redis_code
+                if use_redis:
+                    latest_code = redis_client.get(f"session:{session_obj.id}:code")
+                else:
+                    latest_code = in_memory_code_storage.get(session_obj.id)
+
+                if latest_code and latest_code != session_obj.code:
+                    session_obj.code = latest_code
                     session.add(session_obj)
                     any_updates = True  # Mark as updated
 
@@ -130,5 +160,6 @@ async def save_code_to_db():
 
 @app.on_event("startup")
 async def start_background_tasks():
-    """Start the Redis-to-DB sync process on app startup."""
-    asyncio.create_task(save_code_to_db())
+    """Start the Redis-to-DB sync process only if storage is available."""
+    if use_redis or in_memory_code_storage:
+        asyncio.create_task(save_code_to_db())
