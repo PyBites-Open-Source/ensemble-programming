@@ -8,11 +8,17 @@
     <div class="bg-white shadow-md p-6 rounded-lg">
       <h2 class="text-xl font-semibold mb-4">Shared Code Editor</h2>
       <textarea id="code-editor"></textarea>
-      <button class="bg-indigo-500 text-white font-semibold px-4 py-2 mt-4 rounded-md"
-        hx-post="/run-code/" hx-vals='{"code": document.getElementById("code-editor").value}' hx-target="#output">
-        Run Code
-      </button>
-      <pre id="output"></pre>
+
+      <form hx-post="/run-code/" hx-target="#output" hx-trigger="submit">
+        <input type="hidden" name="code" id="code-input">
+        <button type="submit" class="bg-indigo-500 text-white font-semibold px-4 py-2 mt-4 rounded-md"
+            onclick="document.getElementById('code-input').value = editor.getValue()">
+            Run Code
+        </button>
+      </form>
+
+      <pre id="output" class="mt-4 p-4 rounded-md"></pre>
+
     </div>
 
     <!-- Right Column: Role Rotation & Timer -->
@@ -28,8 +34,8 @@
     var ws = new WebSocket("ws://" + location.host + "/ws/" + session_id);
     var editor = CodeMirror.fromTextArea(document.getElementById("code-editor"), {
         mode: "python",
+        theme: "default",
         lineNumbers: true,
-        theme: "defualt",
         viewportMargin: Infinity,
         indentUnit: 4,
         tabSize: 4,
@@ -66,5 +72,18 @@
         }
     }
     updateTimer();
+
+    document.body.addEventListener("htmx:afterRequest", function(evt) {
+        if (evt.detail.target.id === "output") {
+            const response = evt.detail.xhr.responseText;
+            try {
+                const parsed = JSON.parse(response);
+                document.getElementById("output").innerText =
+                    "Stdout:\n" + parsed.stdout + "\n\nStderr:\n" + parsed.stderr;
+            } catch (error) {
+                document.getElementById("output").innerText = "Error parsing response";
+            }
+        }
+    });
 </script>
 {% endblock %}

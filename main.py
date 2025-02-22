@@ -100,8 +100,8 @@ async def session_page(request: Request, session_id: str):
     )
 
 
-@app.post("/run-code/")
-async def run_code(code: str):
+@app.post("/run-code")
+async def run_code(code: str = Form(...)):
     """Executes the submitted code using Piston API."""
     payload = {
         "language": "python",
@@ -112,7 +112,13 @@ async def run_code(code: str):
         response = await client.post(PISTON_API, json=payload)
         if response.status_code != 200:
             raise HTTPException(status_code=500, detail="Code execution failed")
-        return response.json()
+        result = response.json()
+
+        stdout = result.get("run", {}).get("stdout", "")
+        stderr = result.get("run", {}).get("stderr", "")
+        output = result.get("run", {}).get("output", "")
+
+        return {"stdout": stdout, "stderr": stderr, "output": output}
 
 
 @app.websocket("/ws/{session_id}")
