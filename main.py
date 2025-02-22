@@ -13,6 +13,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -23,7 +24,6 @@ PISTON_API = "https://emkc.org/api/v2/piston/execute"
 engine = create_engine(DATABASE_URL, echo=True)
 templates = Jinja2Templates(directory="templates")
 
-# Try connecting to Redis
 try:
     redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
     redis_client.ping()  # Test Redis connection
@@ -66,8 +66,10 @@ class ConnectionManager:
             await connection.send_text(message)
 
 
-app = FastAPI()
 manager = ConnectionManager()
+
+app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.on_event("startup")

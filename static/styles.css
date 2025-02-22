@@ -1,0 +1,22 @@
+#username-prompt {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5); /* Semi-transparent dark overlay */
+    backdrop-filter: blur(5px); /* Optional: Makes the background slightly blurred */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 50; /* Ensure it’s on top of CodeMirror */
+}
+
+#username-modal {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.2);
+    z-index: 100; /* Ensure modal content is above the overlay */
+}
+
+.CodeMirror {
+    z-index: 10 !important; /* Ensure it's lower than modal */
+}
