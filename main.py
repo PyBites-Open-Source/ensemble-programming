@@ -3,15 +3,19 @@ import uuid
 
 import redis
 from decouple import config
-from fastapi import FastAPI, Form, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+import httpx
+from fastapi import FastAPI, Form, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import JSONResponse
+from fastapi.templating import Jinja2Templates
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 DATABASE_URL = config("DATABASE_URL")
 REDIS_URL = config("REDIS_URL", default="redis://localhost:6379")
+PISTON_API = "https://emkc.org/api/v2/piston/execute"
 
 engine = create_engine(DATABASE_URL, echo=True)
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+templates = Jinja2Templates(directory="templates")
 
 
 class SessionModel(SQLModel, table=True):
@@ -53,9 +57,8 @@ def init_db():
 
 
 @app.get("/")
-async def home():
-    with open("index.html") as f:
-        return HTMLResponse(f.read())
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.post("/new-session")
@@ -71,10 +74,24 @@ async def new_session(goal: str = Form(...)):
 
 
 @app.get("/session/{session_id}")
-async def session_page(session_id: str):
+async def session_page(request: Request, session_id: str):
     """Returns the session page with real-time code editor."""
-    with open("session.html") as f:
-        return HTMLResponse(f.read().replace("{{ session_id }}", session_id))
+    return templates.TemplateResponse("session.html", {"request": request, "session_id": session_id})
+
+
+@app.post("/run-code/")
+async def run_code(code: str):
+    payload = {
+        "language": "python",
+        "version": "3.10.0",
+        "files": [{"content": code}]
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(PISTON_API, json=payload)
+        breakpoint()
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Code execution failed")
+        return response.json()
 
 
 @app.websocket("/ws/{session_id}")

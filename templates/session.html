@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Live Coding Session{% endblock %}
+
+{% block content %}
+<div class="grid grid-cols-2 gap-6">
+    <!-- Left Column: Code Editor -->
+    <div class="bg-white shadow-md p-6 rounded-lg">
+      <h2 class="text-xl font-semibold mb-4">Shared Code Editor</h2>
+      <textarea id="code-editor"></textarea>
+      <button class="bg-indigo-500 text-white font-semibold px-4 py-2 mt-4 rounded-md"
+        hx-post="/run-code/" hx-vals='{"code": document.getElementById("code-editor").value}' hx-target="#output">
+        Run Code
+      </button>
+      <pre id="output"></pre>
+    </div>
+
+    <!-- Right Column: Role Rotation & Timer -->
+    <div class="bg-white shadow-md p-6 rounded-lg">
+        <h2 class="text-xl font-semibold mb-4">Role & Timer</h2>
+        <p id="role" class="text-lg font-medium">Current Role: <span class="text-indigo-600">Driver</span></p>
+        <p id="timer" class="text-lg mt-2">Time Remaining: <span class="text-red-600">05:00</span></p>
+    </div>
+</div>
+
+<script>
+    var session_id = "{{ session_id }}";
+    var ws = new WebSocket("ws://" + location.host + "/ws/" + session_id);
+    var editor = CodeMirror.fromTextArea(document.getElementById("code-editor"), {
+        mode: "python",
+        lineNumbers: true,
+        theme: "defualt",
+        viewportMargin: Infinity,
+        indentUnit: 4,
+        tabSize: 4,
+        indentWithTabs: false,
+        lineWrapping: true,
+        smartIndent: true
+    });
+    var isUpdatingFromServer = false;
+    ws.onmessage = function(event) {
+        if (editor.getValue() !== event.data) {
+            isUpdatingFromServer = true;
+            editor.setValue(event.data);
+            isUpdatingFromServer = false;
+        }
+    };
+
+    editor.on("change", function(cm) {
+        if (!isUpdatingFromServer) {
+            ws.send(cm.getValue());
+        }
+    });
+
+    // Simple 5-min countdown timer
+    var countdown = 300;
+    function updateTimer() {
+        var minutes = Math.floor(countdown / 60);
+        var seconds = countdown % 60;
+        document.getElementById("timer").innerHTML = `Time Remaining: <span class="text-red-600">${minutes}:${seconds.toString().padStart(2, '0')}</span>`;
+        if (countdown > 0) {
+            countdown--;
+            setTimeout(updateTimer, 1000);
+        } else {
+            document.getElementById("role").innerHTML = `Current Role: <span class="text-green-600">Navigator</span>`;
+        }
+    }
+    updateTimer();
+</script>
+{% endblock %}
