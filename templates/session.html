@@ -3,6 +3,15 @@
 {% block title %}Live Coding Session{% endblock %}
 
 {% block content %}
+
+<div id="username-modal" class="fixed inset-0 flex justify-center items-center bg-gray-800 bg-opacity-75">
+    <div class="bg-white p-6 rounded-md shadow-md">
+        <h2 class="text-xl font-semibold">Enter Your Name</h2>
+        <input type="text" id="username-input" class="border p-2 rounded w-full mt-2" onkeydown="if (event.key === 'Enter') setUsername()">
+        <button onclick="setUsername()" class="bg-indigo-500 text-white px-4 py-2 mt-4 rounded-md">Join</button>
+    </div>
+</div>
+
 <div class="grid grid-cols-2 gap-6">
     <!-- Left Column: Code Editor -->
     <div class="bg-white shadow-md p-6 rounded-lg">
@@ -23,18 +32,41 @@
 
     <!-- Right Column: Role Rotation & Timer -->
     <div class="bg-white shadow-md p-6 rounded-lg">
-      <h2 class="text-xl font-semibold mb-4">Role & Timer</h2>
-      <p id="role" class="text-lg font-medium">Current Role: <span id="role-name" class="text-indigo-600">Driver</span></p>
-      <p id="timer" class="text-lg mt-2">Time Remaining: <span id="time-remaining" class="text-red-600">&nbsp;</span></p>
+        <h2 class="text-xl font-semibold mb-4">Role & Timer</h2>
+        <p id="timer" class="text-lg mt-2">Time Remaining: <span id="time-remaining" class="text-red-600"></span></p>
+
+        <h2 class="text-lg font-semibold mt-4">Active Users:</h2>
+        <ul id="user-list" class="mt-2 text-indigo-600"></ul>
     </div>
 
 </div>
 
 <script>
+  let username = "";
   let session_id = "{{ session_id }}";
-  let ws = new WebSocket("ws://" + location.host + "/ws/" + session_id);
-  let timerWS = new WebSocket("ws://" + location.host + "/ws/timer/" + session_id);
 
+  function setUsername() {
+      username = document.getElementById("username-input").value.trim();
+      if (username) {
+          document.getElementById("username-modal").style.display = "none"; // Hide prompt
+          userWS.send(JSON.stringify({ type: "join", username: username })); // Register user
+      }
+  }
+
+  let ws = new WebSocket("ws://" + location.host + "/ws/" + session_id);
+  ws.onmessage = function(event) {
+      let message = JSON.parse(event.data);
+
+      if (message.type === "code") {
+          if (editor.getValue() !== message.content) {
+              isUpdatingFromServer = true;
+              editor.setValue(message.content);
+              isUpdatingFromServer = false;
+          }
+      }
+  };
+
+  let timerWS = new WebSocket("ws://" + location.host + "/ws/timer/" + session_id);
   timerWS.onmessage = function(event) {
     let message = JSON.parse(event.data);
 
@@ -44,6 +76,16 @@
         let remainingSeconds = seconds % 60;
         document.getElementById("time-remaining").textContent =
             `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+    }
+  };
+
+  let userWS = new WebSocket("ws://" + location.host + "/ws/users/" + session_id);
+  userWS.onmessage = function(event) {
+    let message = JSON.parse(event.data);
+
+    if (message.type === "user_list") {
+        let userListHTML = message.users.map(user => `<li>${user}</li>`).join("");
+        document.getElementById("user-list").innerHTML = userListHTML;
     }
   };
 
@@ -58,18 +100,13 @@
       lineWrapping: true,
       smartIndent: true
   });
+
   let isUpdatingFromServer = false;
-  ws.onmessage = function(event) {
-      if (editor.getValue() !== event.data) {
-          isUpdatingFromServer = true;
-          editor.setValue(event.data);
-          isUpdatingFromServer = false;
-      }
-  };
 
   editor.on("change", function(cm) {
       if (!isUpdatingFromServer) {
-          ws.send(cm.getValue());
+          //ws.send(cm.getValue());
+          ws.send(JSON.stringify({ type: "code", content: editor.getValue() }));
       }
   });
 

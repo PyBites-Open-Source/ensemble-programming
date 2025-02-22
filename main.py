@@ -1,6 +1,7 @@
 import asyncio
 import json
 import uuid
+from collections import defaultdict
 
 import httpx
 import redis
@@ -36,7 +37,8 @@ except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
 
 # In-memory storage (used only if Redis is unavailable)
 in_memory_code_storage = {}
-in_memory_roles = {}
+in_memory_timers = {}
+in_memory_users = defaultdict(set)
 
 
 class SessionModel(SQLModel, table=True):
@@ -132,24 +134,32 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
+            message = json.loads(data)
 
-            if use_redis:
-                redis_client.set(f"session:{session_id}:code", data)
-            else:
-                in_memory_code_storage[session_id] = data  # Store in memory
+            if message.get("type") == "code":
+                if use_redis:
+                    redis_client.set(f"session:{session_id}:code", message["content"])
+                else:
+                    in_memory_code_storage[session_id] = message[
+                        "content"
+                    ]  # Store in memory
 
-            await manager.broadcast(session_id, data)
+                await manager.broadcast(
+                    session_id,
+                    json.dumps({"type": "code", "content": message["content"]}),
+                )
+
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)
 
 
 @app.websocket("/ws/timer/{session_id}")
 async def websocket_timer(session_id: str, websocket: WebSocket):
-    await websocket.accept()
+    await manager.connect(session_id, websocket)
     timer = (
         int(redis_client.get(f"session:{session_id}:timer") or 300)
         if use_redis
-        else in_memory_roles.get(f"{session_id}:timer", 300)
+        else in_memory_timers.get(f"{session_id}:timer", 300)
     )
     while True:
         await asyncio.sleep(1)
@@ -158,18 +168,51 @@ async def websocket_timer(session_id: str, websocket: WebSocket):
             if use_redis:
                 redis_client.set(f"session:{session_id}:timer", timer)
             else:
-                in_memory_roles[f"{session_id}:timer"] = timer
+                in_memory_timers[f"{session_id}:timer"] = timer
         await websocket.send_text(json.dumps({"type": "timer", "time": timer}))
         if timer == 0:
             timer = 300  # Reset to 5 minutes
             if use_redis:
                 redis_client.set(f"session:{session_id}:timer", timer)
             else:
-                in_memory_roles[f"{session_id}:timer"] = timer
+                in_memory_timers[f"{session_id}:timer"] = timer
 
             # 🔹 Broadcast the reset timer to ALL clients
             for connection in manager.active_connections.get(session_id, []):
                 await connection.send_text(json.dumps({"type": "timer", "time": timer}))
+
+
+@app.websocket("/ws/users/{session_id}")
+async def websocket_users(session_id: str, websocket: WebSocket):
+    """Tracks users joining a session and broadcasts user list."""
+    await manager.connect(session_id, websocket)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+
+            if message.get("type") == "join":
+                username = message["username"]
+
+                if use_redis:
+                    redis_client.sadd(f"session:{session_id}:users", username)
+                else:
+                    in_memory_users[session_id].add(username)
+
+                if use_redis:
+                    users = list(redis_client.smembers(f"session:{session_id}:users"))
+                else:
+                    users = list(in_memory_users.get(session_id, set()))
+
+                for connection in manager.active_connections.get(session_id, []):
+                    print("sending user list", users)
+                    await connection.send_text(
+                        json.dumps({"type": "user_list", "users": users})
+                    )
+
+    except WebSocketDisconnect:
+        manager.disconnect(session_id, websocket)
 
 
 async def save_code_to_db():
