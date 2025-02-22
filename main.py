@@ -129,8 +129,9 @@ async def run_code(code: str = Form(...)):
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(session_id: str, websocket: WebSocket):
-    """Handles real-time collaborative editing via WebSockets."""
+    """Handles real-time collaborative editing and typing notifications via WebSockets."""
     await manager.connect(session_id, websocket)
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -140,13 +141,25 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
                 if use_redis:
                     redis_client.set(f"session:{session_id}:code", message["content"])
                 else:
-                    in_memory_code_storage[session_id] = message[
-                        "content"
-                    ]  # Store in memory
+                    in_memory_code_storage[session_id] = message["content"]
 
                 await manager.broadcast(
                     session_id,
                     json.dumps({"type": "code", "content": message["content"]}),
+                )
+
+            elif message.get("type") == "typing":
+                await manager.broadcast(
+                    session_id,
+                    json.dumps({"type": "typing", "username": message["username"]}),
+                )
+
+            elif message.get("type") == "stopped_typing":
+                await manager.broadcast(
+                    session_id,
+                    json.dumps(
+                        {"type": "stopped_typing", "username": message["username"]}
+                    ),
                 )
 
     except WebSocketDisconnect:

@@ -17,6 +17,7 @@
     <div class="bg-white shadow-md p-6 rounded-lg">
       <h2 class="text-xl font-semibold mb-4">Shared Code Editor</h2>
       <textarea id="code-editor"></textarea>
+      <p id="typing-indicator" class="text-sm text-gray-500 mt-2"></p>
 
       <form hx-post="/run-code/" hx-target="#output" hx-trigger="submit">
         <input type="hidden" name="code" id="code-input">
@@ -63,8 +64,13 @@
               editor.setValue(message.content);
               isUpdatingFromServer = false;
           }
+      } else if (message.type === "typing") {
+          document.getElementById("typing-indicator").textContent = `${message.username} is typing...`;
+      } else if (message.type === "stopped_typing") {
+          document.getElementById("typing-indicator").textContent = ""; // Remove indicator
       }
   };
+
 
   let timerWS = new WebSocket("ws://" + location.host + "/ws/timer/" + session_id);
   timerWS.onmessage = function(event) {
@@ -103,10 +109,20 @@
 
   let isUpdatingFromServer = false;
 
+  let typingTimeout;
+
   editor.on("change", function(cm) {
       if (!isUpdatingFromServer) {
-          //ws.send(cm.getValue());
           ws.send(JSON.stringify({ type: "code", content: editor.getValue() }));
+
+          // Send "typing" event
+          ws.send(JSON.stringify({ type: "typing", username: username }));
+
+          // Reset the timeout
+          clearTimeout(typingTimeout);
+          typingTimeout = setTimeout(() => {
+              ws.send(JSON.stringify({ type: "stopped_typing", username: username }));
+          }, 2000); // Remove indicator if no typing for 2s
       }
   });
 
