@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+
+{% block title %}Live Coding Session{% endblock %}
+
+{% block content %}
+
+<div id="username-modal" class="fixed inset-0 flex justify-center items-center bg-gray-800 bg-opacity-75">
+    <div class="bg-white p-6 rounded-md shadow-md">
+        <h2 class="text-xl font-semibold">Enter Your Name</h2>
+        <input type="text" id="username-input" class="border p-2 rounded w-full mt-2" onkeydown="if (event.key === 'Enter') setUsername()">
+        <button onclick="setUsername()" class="bg-indigo-500 text-white px-4 py-2 mt-4 rounded-md">Join</button>
+    </div>
+</div>
+
+<div class="grid grid-cols-2 gap-6">
+    <!-- Left Column: Code Editor -->
+    <div class="bg-white shadow-md p-6 rounded-lg">
+      <h2 class="text-xl font-semibold mb-4">Shared Code Editor</h2>
+      <textarea id="code-editor"></textarea>
+      <p id="typing-indicator" class="text-sm text-gray-500 mt-2"></p>
+
+      <form hx-post="/run-code/" hx-target="#output" hx-trigger="submit">
+        <input type="hidden" name="code" id="code-input">
+        <button type="submit" class="bg-indigo-500 text-white font-semibold px-4 py-2 mt-4 rounded-md"
+            onclick="document.getElementById('code-input').value = editor.getValue()">
+            Run Code
+        </button>
+      </form>
+
+      <pre id="output" class="mt-4 p-4 rounded-md"></pre>
+
+    </div>
+
+    <!-- Right Column: Role Rotation & Timer -->
+    <div class="bg-white shadow-md p-6 rounded-lg">
+        <h2 class="text-xl font-semibold mb-4">Role & Timer</h2>
+        <p id="timer" class="text-lg mt-2">Time Remaining: <span id="time-remaining" class="text-red-600"></span></p>
+
+        <h2 class="text-lg font-semibold mt-4">Active Users:</h2>
+        <ul id="user-list" class="mt-2 text-indigo-600"></ul>
+    </div>
+
+</div>
+
+<script>
+  let username = "";
+  let session_id = "{{ session_id }}";
+
+  function setUsername() {
+      username = document.getElementById("username-input").value.trim();
+      if (username) {
+          document.getElementById("username-modal").style.display = "none"; // Hide prompt
+          userWS.send(JSON.stringify({ type: "join", username: username })); // Register user
+      }
+  }
+
+  let ws = new WebSocket("ws://" + location.host + "/ws/" + session_id);
+  ws.onmessage = function(event) {
+      let message = JSON.parse(event.data);
+
+      if (message.type === "code") {
+          if (editor.getValue() !== message.content) {
+              isUpdatingFromServer = true;
+              editor.setValue(message.content);
+              isUpdatingFromServer = false;
+          }
+      } else if (message.type === "typing") {
+          document.getElementById("typing-indicator").textContent = `${message.username} is typing...`;
+      } else if (message.type === "stopped_typing") {
+          document.getElementById("typing-indicator").textContent = ""; // Remove indicator
+      }
+  };
+
+
+  let timerWS = new WebSocket("ws://" + location.host + "/ws/timer/" + session_id);
+  timerWS.onmessage = function(event) {
+    let message = JSON.parse(event.data);
+
+    if (message.type === "timer") {
+        let seconds = message.time;
+        let minutes = Math.floor(seconds / 60);
+        let remainingSeconds = seconds % 60;
+        document.getElementById("time-remaining").textContent =
+            `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+    }
+  };
+
+  let userWS = new WebSocket("ws://" + location.host + "/ws/users/" + session_id);
+  userWS.onmessage = function(event) {
+    let message = JSON.parse(event.data);
+
+    if (message.type === "user_list") {
+        let userListHTML = message.users.map(user => `<li>${user}</li>`).join("");
+        document.getElementById("user-list").innerHTML = userListHTML;
+    }
+  };
+
+  let editor = CodeMirror.fromTextArea(document.getElementById("code-editor"), {
+      mode: "python",
+      theme: "default",
+      lineNumbers: true,
+      viewportMargin: Infinity,
+      indentUnit: 4,
+      tabSize: 4,
+      indentWithTabs: false,
+      lineWrapping: true,
+      smartIndent: true
+  });
+
+  let isUpdatingFromServer = false;
+
+  let typingTimeout;
+
+  editor.on("change", function(cm) {
+      if (!isUpdatingFromServer) {
+          ws.send(JSON.stringify({ type: "code", content: editor.getValue() }));
+
+          // Send "typing" event
+          ws.send(JSON.stringify({ type: "typing", username: username }));
+
+          // Reset the timeout
+          clearTimeout(typingTimeout);
+          typingTimeout = setTimeout(() => {
+              ws.send(JSON.stringify({ type: "stopped_typing", username: username }));
+          }, 2000); // Remove indicator if no typing for 2s
+      }
+  });
+
+  document.body.addEventListener("htmx:afterRequest", function(evt) {
+      if (evt.detail.target.id === "output") {
+          const response = evt.detail.xhr.responseText;
+          try {
+              const parsed = JSON.parse(response);
+              document.getElementById("output").innerText =
+                  "Stdout:\n" + parsed.stdout + "\n\nStderr:\n" + parsed.stderr;
+          } catch (error) {
+              document.getElementById("output").innerText = "Error parsing response";
+          }
+      }
+  });
+</script>
+{% endblock %}

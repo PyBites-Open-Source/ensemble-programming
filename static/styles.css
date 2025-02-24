@@ -1,0 +1,16 @@
+#username-modal {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.2);
+    z-index: 100; /* Ensure modal content is above the overlay */
+}
+
+.CodeMirror {
+    z-index: 10 !important; /* Ensure it's lower than modal */
+}
+#time-remaining {
+    display: inline-block;
+    width: 50px; /* Adjust as needed */
+    text-align: center;
+}
