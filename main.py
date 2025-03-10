@@ -1,7 +1,6 @@
 import asyncio
 import json
 import uuid
-from collections import defaultdict
 
 import httpx
 import redis
@@ -26,19 +25,9 @@ PISTON_API = "https://emkc.org/api/v2/piston/execute"
 engine = create_engine(DATABASE_URL, echo=True)
 templates = Jinja2Templates(directory="templates")
 
-try:
-    redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-    redis_client.ping()  # Test Redis connection
-    use_redis = True
-except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
-    redis_client = None
-    use_redis = False
-    print("⚠️ Redis not available. Using in-memory storage instead.")
+redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
-# In-memory storage (used only if Redis is unavailable)
-in_memory_code_storage = {}
-in_memory_timers = {}
-in_memory_users = defaultdict(set)
+ROTATION_TIME = 10
 
 
 class SessionModel(SQLModel, table=True):
@@ -138,10 +127,7 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
             message = json.loads(data)
 
             if message.get("type") == "code":
-                if use_redis:
-                    redis_client.set(f"session:{session_id}:code", message["content"])
-                else:
-                    in_memory_code_storage[session_id] = message["content"]
+                redis_client.set(f"session:{session_id}:code", message["content"])
 
                 await manager.broadcast(
                     session_id,
@@ -169,30 +155,76 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
 @app.websocket("/ws/timer/{session_id}")
 async def websocket_timer(session_id: str, websocket: WebSocket):
     await manager.connect(session_id, websocket)
-    timer = (
-        int(redis_client.get(f"session:{session_id}:timer") or 300)
-        if use_redis
-        else in_memory_timers.get(f"{session_id}:timer", 300)
-    )
-    while True:
-        await asyncio.sleep(1)
-        if timer > 0:
-            timer -= 1
-            if use_redis:
-                redis_client.set(f"session:{session_id}:timer", timer)
-            else:
-                in_memory_timers[f"{session_id}:timer"] = timer
-        await websocket.send_text(json.dumps({"type": "timer", "time": timer}))
-        if timer == 0:
-            timer = 300  # Reset to 5 minutes
-            if use_redis:
-                redis_client.set(f"session:{session_id}:timer", timer)
-            else:
-                in_memory_timers[f"{session_id}:timer"] = timer
 
-            # 🔹 Broadcast the reset timer to ALL clients
-            for connection in manager.active_connections.get(session_id, []):
-                await connection.send_text(json.dumps({"type": "timer", "time": timer}))
+    timer = int(redis_client.get(f"session:{session_id}:timer") or ROTATION_TIME)
+    current_driver = redis_client.get(f"session:{session_id}:driver")
+    current_navigator = redis_client.get(f"session:{session_id}:navigator")
+
+    try:
+        # 🔹 Immediately send current roles to the newly connected client
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "roles",
+                    "driver": current_driver or "Waiting...",
+                    "navigator": current_navigator or "Waiting...",
+                }
+            )
+        )
+
+        while True:
+            await asyncio.sleep(1)
+
+            if timer > 0:
+                timer -= 1
+                redis_client.set(f"session:{session_id}:timer", timer)
+
+            await websocket.send_text(json.dumps({"type": "timer", "time": timer}))
+
+            if timer == 0:
+                users = [
+                    key
+                    for key, value in redis_client.hgetall(
+                        f"session:{session_id}:users"
+                    ).items()
+                    if json.loads(value)["active"]
+                ]
+
+                if users:
+                    users.sort()
+                    current_index = (
+                        users.index(current_driver) if current_driver in users else -1
+                    )
+
+                    current_driver = users[(current_index + 1) % len(users)]
+                    current_navigator = (
+                        users[(current_index + 2) % len(users)]
+                        if len(users) > 1
+                        else None
+                    )
+
+                    redis_client.set(f"session:{session_id}:driver", current_driver)
+                    redis_client.set(
+                        f"session:{session_id}:navigator", current_navigator or ""
+                    )
+
+                    await manager.broadcast(
+                        session_id,
+                        json.dumps(
+                            {
+                                "type": "roles",
+                                "driver": current_driver,
+                                "navigator": current_navigator,
+                            }
+                        ),
+                    )
+
+                timer = ROTATION_TIME
+                redis_client.set(f"session:{session_id}:timer", timer)
+
+    except WebSocketDisconnect:
+        print(f"🔴 WebSocket disconnected for session {session_id}")
+        manager.disconnect(session_id, websocket)
 
 
 @app.websocket("/ws/users/{session_id}")
@@ -207,54 +239,79 @@ async def websocket_users(session_id: str, websocket: WebSocket):
 
             if message.get("type") == "join":
                 username = message["username"]
+                participate = message.get("participate", False)
 
-                if use_redis:
-                    redis_client.sadd(f"session:{session_id}:users", username)
-                else:
-                    in_memory_users[session_id].add(username)
+                redis_client.hset(
+                    f"session:{session_id}:users",
+                    username,
+                    json.dumps({"active": participate}),
+                )
 
-                if use_redis:
-                    users = list(redis_client.smembers(f"session:{session_id}:users"))
-                else:
-                    users = list(in_memory_users.get(session_id, set()))
+                users = [
+                    key
+                    for key, value in redis_client.hgetall(
+                        f"session:{session_id}:users"
+                    ).items()
+                    if json.loads(value)["active"]
+                ]
 
-                for connection in manager.active_connections.get(session_id, []):
-                    print("sending user list", users)
-                    await connection.send_text(
-                        json.dumps({"type": "user_list", "users": users})
-                    )
+                users.sort()
+                current_driver = redis_client.get(f"session:{session_id}:driver")
+                current_navigator = redis_client.get(f"session:{session_id}:navigator")
+
+                if users:
+                    if not current_driver or current_driver not in users:
+                        current_driver = users[0]
+                        redis_client.set(f"session:{session_id}:driver", current_driver)
+
+                    if len(users) > 1 and (
+                        not current_navigator or current_navigator not in users
+                    ):
+                        current_navigator = users[1]
+                        redis_client.set(
+                            f"session:{session_id}:navigator", current_navigator
+                        )
+
+                await manager.broadcast(
+                    session_id,
+                    json.dumps(
+                        {
+                            "type": "user_list",
+                            "users": users,
+                            "driver": current_driver,
+                            "navigator": current_navigator,
+                        }
+                    ),
+                )
 
     except WebSocketDisconnect:
+        print(f"🔴 WebSocket disconnected for session {session_id}")
         manager.disconnect(session_id, websocket)
 
 
 async def save_code_to_db():
     """Periodically saves Redis/in-memory code updates to the database only if changes exist."""
     while True:
-        await asyncio.sleep(5)  # Batch save every 5 seconds
+        await asyncio.sleep(5)
 
         with Session(engine) as session:
             stmt = select(SessionModel)
             sessions = session.exec(stmt).all()
-            any_updates = False  # Track if any updates were made
+            any_updates = False
 
             for session_obj in sessions:
-                if use_redis:
-                    latest_code = redis_client.get(f"session:{session_obj.id}:code")
-                else:
-                    latest_code = in_memory_code_storage.get(session_obj.id)
+                latest_code = redis_client.get(f"session:{session_obj.id}:code")
 
                 if latest_code and latest_code != session_obj.code:
                     session_obj.code = latest_code
                     session.add(session_obj)
-                    any_updates = True  # Mark as updated
+                    any_updates = True
 
             if any_updates:
-                session.commit()  # Only commit if there were changes
+                session.commit()
 
 
 @app.on_event("startup")
 async def start_background_tasks():
     """Start the Redis-to-DB sync process only if storage is available."""
-    if use_redis or in_memory_code_storage:
-        asyncio.create_task(save_code_to_db())
+    asyncio.create_task(save_code_to_db())
