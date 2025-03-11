@@ -27,7 +27,7 @@ templates = Jinja2Templates(directory="templates")
 
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
-ROTATION_TIME = 10
+ROTATION_TIME = 300
 
 
 class SessionModel(SQLModel, table=True):
